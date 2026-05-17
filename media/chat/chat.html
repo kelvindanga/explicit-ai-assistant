@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Explicit AI</title>
+  <!-- CSP -->
+  <!-- STYLES -->
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="toolbar">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">AI</div>
+        <div>
+          <div class="brand-title">Explicit AI</div>
+          <div class="brand-sub">Explicit context only</div>
+        </div>
+      </div>
+      <div class="toolbar-actions">
+        <select id="modelCategory" class="select" title="Model category">
+          <option value="chat">Chat</option>
+          <option value="code">Code</option>
+          <option value="debug">Debug</option>
+        </select>
+        <select id="modelSelect" class="select model-select" title="Model"></select>
+        <button type="button" class="icon-btn" id="refreshModels" title="Refresh models">↻</button>
+        <button type="button" class="icon-btn" id="threadsBtn" title="Threads">🧵</button>
+        <button type="button" class="icon-btn" id="agentsBtn" title="Agents">🤖</button>
+        <button type="button" class="icon-btn" id="planBtn" title="Plan">📋</button>
+        <button type="button" class="icon-btn" id="memoryBtn" title="Memory">🧠</button>
+        <button type="button" class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
+        <button type="button" class="icon-btn" id="newSessionBtn" title="New session (Ctrl+Shift+N)">➕</button>
+        <button type="button" class="icon-btn" id="clearBtn" title="Clear chat">🗑</button>
+      </div>
+    </header>
+
+    <div class="model-badge" id="modelBadge">Model: —</div>
+    <div class="token-bar" id="tokenBar">
+      <div class="token-bar-fill" id="tokenBarFill"></div>
+      <span class="token-bar-label" id="tokenBarLabel">—</span>
+      <button type="button" class="token-bar-compact" id="compactBtn" title="Compact conversation to free context space">Compact</button>
+    </div>
+
+    <!-- Mode indicator -->
+    <div class="mode-badge" id="modeBadge">
+      <span class="mode-icon" id="modeIcon">🎨</span>
+      <span id="modeLabel">Vibe Mode</span>
+      <button type="button" class="mode-switch-btn" id="modeSwitchBtn" title="Switch mode">Switch</button>
+    </div>
+
+    <main class="thread" id="thread">
+      <section class="welcome" id="welcome">
+        <div class="onboarding-status" id="onboardingStatus">
+          <div class="onboarding-icon" id="onboardingIcon">⏳</div>
+          <div class="onboarding-text" id="onboardingText">Checking LM Studio connection...</div>
+        </div>
+        <h2>Choose your workflow</h2>
+        <p>Pick a mode that matches how you want to work.</p>
+        <div class="mode-cards">
+          <button type="button" class="mode-card" id="vibeMode" data-mode="vibe">
+            <div class="mode-card-icon">🎨</div>
+            <div class="mode-card-title">Vibe</div>
+            <div class="mode-card-desc">Chat first, then build. Explore ideas and iterate as you discover needs.</div>
+          </button>
+          <button type="button" class="mode-card" id="agileMode" data-mode="agile">
+            <div class="mode-card-icon">🔄</div>
+            <div class="mode-card-title">Agile</div>
+            <div class="mode-card-desc">Plan enough to start, then build, test, and improve continuously in small cycles.</div>
+          </button>
+        </div>
+        <div class="onboarding-hint">
+          <p>💡 Make sure <strong>LM Studio</strong> is running at <code>localhost:1234</code> with a model loaded.</p>
+          <p>Use <kbd>Ctrl+Shift+A</kbd> to open chat anytime.</p>
+        </div>
+      </section>
+    </main>
+
+    <div class="drop-overlay hidden" id="dropOverlay">Drop files to attach</div>
+
+    <!-- Threads panel -->
+    <section class="threads-panel hidden" id="threadsPanel">
+      <div class="panel-header">
+        <span>Threads</span>
+        <button type="button" class="link-btn" id="threadsClose">Close</button>
+      </div>
+      <div class="threads-list" id="threadsList"></div>
+    </section>
+
+    <!-- Agents panel -->
+    <section class="agents-panel hidden" id="agentsPanel">
+      <div class="panel-header">
+        <span>Agents</span>
+        <button type="button" class="link-btn" id="agentsClose">Close</button>
+      </div>
+      <div class="agents-list" id="agentsList"></div>
+      <button type="button" class="btn primary agent-add-btn" id="addAgentBtn">+ Add Agent</button>
+    </section>
+
+    <!-- Plan panel -->
+    <section class="threads-panel hidden" id="planPanel">
+      <div class="panel-header">
+        <span>📋 Active Plan</span>
+        <button type="button" class="link-btn" id="planClose">Close</button>
+      </div>
+      <div id="planContent" class="plan-content">
+        <div style="font-size:11px;opacity:0.6;padding:8px;">No active plan. Create one to track your work.</div>
+      </div>
+      <div class="plan-actions">
+        <button type="button" class="btn primary agent-add-btn" id="createPlanBtn">+ New Plan</button>
+      </div>
+    </section>
+
+    <!-- Memory panel -->
+    <section class="threads-panel hidden" id="memoryPanel">
+      <div class="panel-header">
+        <span>🧠 Project Memory</span>
+        <button type="button" class="link-btn" id="memoryClose">Close</button>
+      </div>
+      <div id="memoryContent" class="memory-content">
+        <div style="font-size:11px;opacity:0.6;padding:8px;">No memories stored yet.</div>
+      </div>
+      <button type="button" class="btn primary agent-add-btn" id="addMemoryBtn">+ Remember Something</button>
+    </section>
+
+    <section class="payload-modal hidden" id="payloadModal">
+      <div class="payload-card">
+        <h3>Payload preview</h3>
+        <p class="payload-hint">Review exactly what will be sent to LM Studio.</p>
+        <pre class="payload-pre" id="payloadPre"></pre>
+        <div class="payload-actions">
+          <button type="button" class="btn secondary" id="payloadCancel">Cancel</button>
+          <button type="button" class="btn primary" id="payloadConfirm">Send to model</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="mcp-panel hidden" id="mcpPanel">
+      <div class="mcp-header">
+        <span>MCP tools (manual approval required)</span>
+        <div>
+          <button type="button" class="link-btn" id="mcpConfigBtn">Config</button>
+          <button type="button" class="link-btn" id="mcpClose">Close</button>
+        </div>
+      </div>
+      <div class="mcp-tools" id="mcpTools"></div>
+    </section>
+
+    <footer class="composer-wrap">
+      <div class="file-chips" id="fileChips"></div>
+      <div class="composer-actions">
+        <button type="button" class="chip-btn" id="attachBtn" title="Attach files">📎 Attach</button>
+        <button type="button" class="chip-btn" id="attachSelBtn" title="Attach selection">⌗ Selection</button>
+        <button type="button" class="chip-btn" id="gitDiffBtn" title="Attach git diff">🔀 Git Diff</button>
+        <button type="button" class="chip-btn" id="mcpBtn" title="MCP tools">🔧 MCP</button>
+        <button type="button" class="chip-btn" id="exportBtn" title="Export conversation">💾 Export</button>
+      </div>
+      <div class="composer" id="composer">
+        <textarea id="promptInput" class="composer-input" rows="1" placeholder="Ask anything… @agent for agents, #file to attach files"></textarea>
+        <div class="composer-buttons">
+          <button type="button" class="icon-btn stop hidden" id="stopBtn" title="Stop">■</button>
+          <button type="button" class="icon-btn regen hidden" id="regenBtn" title="Regenerate">↻</button>
+          <button type="button" class="send-btn" id="sendBtn" title="Send">↑</button>
+        </div>
+      </div>
+      <p class="composer-hint"><kbd>Enter</kbd> send · <kbd>Shift+Enter</kbd> newline · English responses enforced</p>
+    </footer>
+  </div>
+  <!-- SCRIPT -->
+</body>
+</html>

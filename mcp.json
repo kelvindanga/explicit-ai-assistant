@@ -1,0 +1,72 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    },
+    "serverShell": {
+      "command": "npx",
+      "args": [
+        "@iflow-mcp/mcp-shell-server"
+      ]
+    },
+    "fileSystem": {
+      "command": "npx",
+      "args": [
+        "@modelcontextprotocol/server-filesystem",
+        "C:\\Projects\\Forticare-BE"
+      ]
+    },
+    "web-search": {
+      "command": "node",
+      "args": [
+        "C:\\Projects\\web-search-mcp\\dist\\index.js"
+      ],
+      "env": {
+        "MAX_CONTENT_LENGTH": "10000",
+        "BROWSER_HEADLESS": "true",
+        "MAX_BROWSERS": "3",
+        "BROWSER_FALLBACK_THRESHOLD": "3"
+      }
+    },
+    "prgenerator": {
+      "command": "node",
+      "args": [
+        "C:\\Projects\\git-pr-generator\\build\\index.js"
+      ]
+    },
+    "prreview": {
+      "command": "node",
+      "args": [
+        "C:\\Projects\\pr-review-brain\\build\\index.js"
+      ]
+    },
+    "freeradius": {
+      "command": "node",
+      "args": [
+        "C:\\Projects\\freeradius-mcp\\build\\index.js"
+      ]
+    },
+    "mpesaapi": {
+      "command": "node",
+      "args": [
+        "C:\\Projects\\MPESAAPI-MCP\\build\\index.js"
+      ]
+    },
+    "MCP_DOCKER": {
+      "command": "docker",
+      "args": [
+        "mcp",
+        "gateway",
+        "run"
+      ],
+      "env": {
+        "LOCALAPPDATA": "C:\\Users\\Kelvin.Danga\\AppData\\Local",
+        "ProgramData": "C:\\ProgramData",
+        "ProgramFiles": "C:\\Program Files"
+      }
+    }
+  }
+}

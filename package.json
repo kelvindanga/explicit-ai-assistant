@@ -1,0 +1,350 @@
+{
+  "name": "explicit-ai-assistant",
+  "displayName": "Explicit AI — Agile Development Assistant",
+  "description": "AI-powered agile development right in VS Code. Plan sprints, manage tasks, review code, and build features with @agent commands and #file context. Works with any OpenAI-compatible API — LM Studio, Ollama, OpenAI, Groq, Together, and more. No telemetry, no auto-indexing. You control what the AI sees.",
+  "version": "2.0.0",
+  "author": "Kelvin Danga",
+  "publisher": "kelvin-danga",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kelvin-danga/explicit-ai-assistant"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Other", "Machine Learning"],
+  "keywords": ["ai", "agile", "planner", "code review", "llm", "local ai", "ollama", "lm studio", "sprint", "copilot alternative"],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onView:explicitAI.chatView",
+    "onCommand:explicitAI.openChat",
+    "onCommand:explicitAI.openChatPanel",
+    "onCommand:explicitAI.openChatSidebar"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "explicit-ai",
+          "title": "Explicit AI",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "explicit-ai": [
+        {
+          "type": "webview",
+          "id": "explicitAI.chatView",
+          "name": "Chat",
+          "contextualTitle": "Explicit AI Chat"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Explicit AI",
+      "properties": {
+        "explicitAI.lmStudioBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:1234",
+          "description": "Base URL for the OpenAI-compatible API (LM Studio, Ollama, vLLM, LocalAI, or any provider)."
+        },
+        "explicitAI.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:1234/v1/chat/completions",
+          "description": "Chat completions endpoint (OpenAI-compatible)."
+        },
+        "explicitAI.modelsUrl": {
+          "type": "string",
+          "default": "http://localhost:1234/v1/models",
+          "description": "Models list endpoint (GET)."
+        },
+        "explicitAI.defaultModel": {
+          "type": "string",
+          "default": "meta-llama-3.1-8b-instruct",
+          "description": "Fallback model id."
+        },
+        "explicitAI.codeModel": {
+          "type": "string",
+          "default": "codeqwen1.5-7b-chat",
+          "description": "Model for Code category."
+        },
+        "explicitAI.chatModel": {
+          "type": "string",
+          "default": "meta-llama-3.1-8b-instruct",
+          "description": "Model for Chat category."
+        },
+        "explicitAI.debugModel": {
+          "type": "string",
+          "default": "meta-llama-3.1-8b-instruct",
+          "description": "Model for Debug category."
+        },
+        "explicitAI.systemPrompt": {
+          "type": "string",
+          "default": "You are a helpful coding assistant. Answer using only the context the user explicitly provided.",
+          "description": "Base system prompt."
+        },
+        "explicitAI.sidebarPlacement": {
+          "type": "string",
+          "enum": ["left", "right", "panel"],
+          "default": "left",
+          "description": "Where to open chat by default."
+        },
+        "explicitAI.streaming": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stream tokens from LM Studio (SSE)."
+        },
+        "explicitAI.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature."
+        },
+        "explicitAI.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 1,
+          "description": "Max tokens per response."
+        },
+        "explicitAI.contextWindow": {
+          "type": "number",
+          "default": 32768,
+          "minimum": 2048,
+          "description": "Model context window size in tokens. Set to match your model (e.g. 8192, 32768, 131072)."
+        },
+        "explicitAI.enforceEnglish": {
+          "type": "boolean",
+          "default": true,
+          "description": "Always respond in English; auto-retry if not."
+        },
+        "explicitAI.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "Request timeout in milliseconds."
+        },
+        "explicitAI.showPayloadPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show payload preview before sending to the model."
+        },
+        "explicitAI.mcpEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable MCP tools (each action still requires approval)."
+        },
+        "explicitAI.mcpFilesystem": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow filesystem.readFile MCP tool."
+        },
+        "explicitAI.mcpTerminal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow terminal.runCommand MCP tool."
+        },
+        "explicitAI.mcpHttp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow http.request MCP tool."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "explicitAI.askSelection",
+        "title": "Explicit AI: Ask About Selection",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.askManual",
+        "title": "Explicit AI: Ask (No Context)",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.sendFile",
+        "title": "Explicit AI: Ask About File...",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.openChat",
+        "title": "Explicit AI: Open Chat",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.openChatSidebar",
+        "title": "Explicit AI: Open Chat (Sidebar)",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.openChatPanel",
+        "title": "Explicit AI: Open Chat (Panel)",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.stopGeneration",
+        "title": "Explicit AI: Stop Generation",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.openMcpConfig",
+        "title": "Explicit AI: Open MCP Config",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.manageAgents",
+        "title": "Explicit AI: Manage Agents",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.checkHealth",
+        "title": "Explicit AI: Check LM Studio Connection",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.exportConversation",
+        "title": "Explicit AI: Export Conversation",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.explainCode",
+        "title": "Explicit AI: Explain This Code",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.fixDiagnostic",
+        "title": "Explicit AI: Fix Errors in File",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.generateTests",
+        "title": "Explicit AI: Generate Tests",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.generatePrDescription",
+        "title": "Explicit AI: Generate PR Description",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.generateDocs",
+        "title": "Explicit AI: Generate Documentation",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.askWorkspace",
+        "title": "Explicit AI: Ask About Codebase",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.newSession",
+        "title": "Explicit AI: New Session",
+        "category": "Explicit AI"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "explicitAI.askSelection",
+          "when": "editorHasSelection",
+          "group": "explicitAI@1"
+        },
+        {
+          "command": "explicitAI.explainCode",
+          "group": "explicitAI@2"
+        },
+        {
+          "command": "explicitAI.fixDiagnostic",
+          "group": "explicitAI@3"
+        },
+        {
+          "command": "explicitAI.generateTests",
+          "group": "explicitAI@4"
+        },
+        {
+          "command": "explicitAI.generateDocs",
+          "group": "explicitAI@5"
+        }
+      ],
+      "commandPalette": [
+        { "command": "explicitAI.openChat" },
+        { "command": "explicitAI.openChatSidebar" },
+        { "command": "explicitAI.openChatPanel" },
+        { "command": "explicitAI.askSelection" },
+        { "command": "explicitAI.askManual" },
+        { "command": "explicitAI.sendFile" },
+        { "command": "explicitAI.stopGeneration" },
+        { "command": "explicitAI.openMcpConfig" },
+        { "command": "explicitAI.manageAgents" },
+        { "command": "explicitAI.checkHealth" },
+        { "command": "explicitAI.exportConversation" },
+        { "command": "explicitAI.explainCode" },
+        { "command": "explicitAI.fixDiagnostic" },
+        { "command": "explicitAI.generateTests" },
+        { "command": "explicitAI.generatePrDescription" },
+        { "command": "explicitAI.generateDocs" },
+        { "command": "explicitAI.askWorkspace" },
+        { "command": "explicitAI.newSession" }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "explicitAI.openChat",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
+      },
+      {
+        "command": "explicitAI.askSelection",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "explicitAI.stopGeneration",
+        "key": "ctrl+shift+x",
+        "mac": "cmd+shift+x"
+      },
+      {
+        "command": "explicitAI.askManual",
+        "key": "ctrl+shift+m",
+        "mac": "cmd+shift+m"
+      },
+      {
+        "command": "explicitAI.explainCode",
+        "key": "ctrl+shift+h",
+        "mac": "cmd+shift+h",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "explicitAI.fixDiagnostic",
+        "key": "ctrl+shift+f",
+        "mac": "cmd+shift+f",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "explicitAI.generateTests",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "explicitAI.newSession",
+        "key": "ctrl+shift+n",
+        "mac": "cmd+shift+n"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p . && node scripts/validate-chat-html.mjs",
+    "watch": "tsc -watch -p .",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}
