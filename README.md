@@ -261,6 +261,9 @@ npm run build        # Compile TypeScript + validate HTML
 npm run watch        # Watch mode for development
 ```
 
+## Install
+code --install-extension explicit-ai-assistant-2.0.0.vsix
+
 Press `F5` in VS Code to launch the extension in a development host.
 
 ## License
