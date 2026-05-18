@@ -87,6 +87,21 @@
   document.querySelectorAll(".mode-card").forEach(function(card) { card.addEventListener("click", function() { setMode(card.getAttribute("data-mode")); }); });
   if ($("modeSwitchBtn")) $("modeSwitchBtn").addEventListener("click", function() { setMode(state.mode === "vibe" ? "agile" : "vibe"); });
 
+  // --- Execution mode toggle (Agentic / Supervised) ---
+  var execMode = "agentic"; // default
+  if ($("agenticBtn")) $("agenticBtn").addEventListener("click", function() {
+    execMode = "agentic";
+    $("agenticBtn").classList.add("active");
+    $("supervisedBtn").classList.remove("active");
+    vscode.postMessage({ type: "setExecMode", mode: "agentic" });
+  });
+  if ($("supervisedBtn")) $("supervisedBtn").addEventListener("click", function() {
+    execMode = "supervised";
+    $("supervisedBtn").classList.add("active");
+    $("agenticBtn").classList.remove("active");
+    vscode.postMessage({ type: "setExecMode", mode: "supervised" });
+  });
+
   // --- Threads ---
   if ($("threadsBtn")) $("threadsBtn").addEventListener("click", function() {
     $("threadsPanel").classList.toggle("hidden"); if ($("agentsPanel")) $("agentsPanel").classList.add("hidden");
@@ -101,6 +116,7 @@
   });
   if ($("agentsClose")) $("agentsClose").addEventListener("click", function() { $("agentsPanel").classList.add("hidden"); });
   if ($("addAgentBtn")) $("addAgentBtn").addEventListener("click", function() { vscode.postMessage({ type: "addAgent" }); });
+  if ($("importAgentBtn")) $("importAgentBtn").addEventListener("click", function() { vscode.postMessage({ type: "importAgent" }); });
 
   // --- MCP ---
   if ($("mcpBtn")) $("mcpBtn").addEventListener("click", function() {
@@ -247,6 +263,35 @@
 
   function getStreamingBubble(id) { var row = thread.querySelector('.message.assistant[data-id="' + id + '"]'); return row ? row.querySelector(".bubble-inner") : null; }
 
+  // --- Real-time streaming stats (token counter) ---
+  function updateStreamStats(msg) {
+    var row = thread.querySelector('.message.assistant[data-id="' + msg.id + '"]');
+    if (!row) return;
+    var badge = row.querySelector(".stream-stats");
+    if (!badge) {
+      badge = document.createElement("div");
+      badge.className = "stream-stats";
+      row.querySelector(".bubble").prepend(badge);
+    }
+    var tokPerSec = msg.elapsed > 0 ? Math.round(msg.outputTokens / msg.elapsed) : 0;
+    var elapsed = msg.elapsed || 0;
+    if (msg.done) {
+      badge.innerHTML = '<span class="ss-done">✓</span> ' + msg.inputTokens + ' in → ' + msg.outputTokens + ' out · ' + elapsed + 's' + (tokPerSec ? ' · ' + tokPerSec + ' tok/s' : '');
+      badge.classList.add("done");
+    } else {
+      badge.innerHTML = '<span class="ss-in">' + msg.inputTokens + ' in</span> <span class="ss-gen">' + msg.outputTokens + ' GEN</span> <span class="ss-time">' + elapsed + 's</span>';
+    }
+  }
+
+  function removeStreamStats(id) {
+    // Keep the final stats visible (don't remove — it shows the summary)
+    var row = thread.querySelector('.message.assistant[data-id="' + id + '"]');
+    if (row) {
+      var badge = row.querySelector(".stream-stats");
+      if (badge) badge.classList.add("done");
+    }
+  }
+
   function autoResize() { promptInput.style.height = "auto"; promptInput.style.height = Math.min(promptInput.scrollHeight, 140) + "px"; }
 
   function send() {
@@ -342,19 +387,21 @@
 
     if (atMatch !== null) {
       autocompletePrefix = (atMatch[1] || "").toLowerCase();
-      // Show all agents when just "@" is typed, or filter by prefix
+      // Show all agents + context mentions when just "@" is typed, or filter by prefix
       var allAgents = state.agents || [];
-      var filtered = allAgents.filter(function(a) {
-        if (!autocompletePrefix) return true; // show all on bare @
+      // Add context mentions as special items
+      var contextMentions = [
+        { id: "terminal", name: "terminal", description: "Include recent terminal errors" },
+        { id: "workspace", name: "workspace", description: "Include project file structure" }
+      ];
+      var allItems = contextMentions.concat(allAgents);
+      var filtered = allItems.filter(function(a) {
+        if (!autocompletePrefix) return true;
         return a.id.toLowerCase().indexOf(autocompletePrefix) >= 0 ||
                a.name.toLowerCase().indexOf(autocompletePrefix) >= 0;
       }).slice(0, 10);
       if (filtered.length > 0) {
         showAutocomplete(filtered, "agent");
-      } else if (!autocompletePrefix && allAgents.length === 0) {
-        // Agents not loaded yet — request them
-        vscode.postMessage({ type: "getAgents" });
-        showAutocomplete([{ id: "loading", name: "Loading agents...", description: "" }], "agent");
       } else {
         hideAutocomplete();
       }
@@ -801,6 +848,12 @@
           thread.appendChild(revertNote);
           scrollBottom();
         }
+        // Restore the undone prompt to the textarea so user can edit and resend
+        if (msg.lastPrompt) {
+          promptInput.value = msg.lastPrompt;
+          autoResize();
+          promptInput.focus();
+        }
         setBusy(false);
         break;
       case "toolApproval":
@@ -828,8 +881,9 @@
       case "payloadPreview": vscode.postMessage({ type: "confirmPayload", prompt: msg.payload.userPrompt, context: "" }); break;
       case "userMessage": appendMessage("user", msg.message.content, { id: msg.message.id, timestamp: msg.message.timestamp, files: msg.files }); setBusy(true); break;
       case "streamStart": state.streamingId = msg.id; appendMessage("assistant", "", { id: msg.id, streaming: true, model: msg.model }); setBusy(true); break;
+      case "streamStats": updateStreamStats(msg); break;
       case "streamDelta": var elD = getStreamingBubble(msg.id); if (elD) { if (elD.querySelector(".typing-dots")) elD.innerHTML = ""; elD.innerHTML = formatMarkdown((elD.dataset.raw || "") + msg.chunk); elD.dataset.raw = (elD.dataset.raw || "") + msg.chunk; } scrollBottom(); break;
-      case "streamEnd": var elE = getStreamingBubble(msg.id); if (elE) { elE.innerHTML = formatMarkdown(msg.message.content); delete elE.dataset.raw; } state.streamingId = null; setBusy(false); if (regenBtn) regenBtn.classList.remove("hidden"); break;
+      case "streamEnd": var elE = getStreamingBubble(msg.id); if (elE) { elE.innerHTML = formatMarkdown(msg.message.content); delete elE.dataset.raw; } removeStreamStats(msg.id); state.streamingId = null; setBusy(false); if (regenBtn) regenBtn.classList.remove("hidden"); break;
       case "error": var elErr = getStreamingBubble(msg.id); if (elErr) elErr.closest(".message").remove(); appendMessage("error", msg.text, { id: msg.id }); setBusy(false); break;
       case "stopped":
         // Add stopped indicator to the last streaming message
@@ -910,6 +964,30 @@
         agentNote.className = "stopped-indicator";
         agentNote.textContent = "🤖 " + (msg.agentName || msg.agentId) + " activated";
         thread.appendChild(agentNote);
+        scrollBottom();
+        break;
+      case "terminalError":
+        // Show terminal error with option to fix
+        var errCard = document.createElement("div");
+        errCard.className = "terminal-error-card";
+        errCard.innerHTML =
+          '<div class="te-header">⚠️ Terminal error detected in <strong>' + escapeHtml(msg.terminal) + '</strong></div>' +
+          '<pre class="te-error">' + escapeHtml(msg.error) + '</pre>' +
+          '<button type="button" class="btn primary te-fix-btn">🔧 Auto-fix</button>';
+        errCard.querySelector(".te-fix-btn").addEventListener("click", function() {
+          promptInput.value = "Fix this terminal error: " + msg.error;
+          autoResize();
+          send();
+          errCard.remove();
+        });
+        thread.appendChild(errCard);
+        scrollBottom();
+        break;
+      case "chainLimitReached":
+        var chainNote = document.createElement("div");
+        chainNote.className = "stopped-indicator";
+        chainNote.textContent = "⚡ Agent reached max chain depth (10 actions). Send another message to continue.";
+        thread.appendChild(chainNote);
         scrollBottom();
         break;
       case "cleared":

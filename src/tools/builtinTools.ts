@@ -4,6 +4,7 @@ import * as path from "path";
 import * as child_process from "child_process";
 import * as util from "util";
 import { fileTracker } from "../core/fileTracker";
+import { showDiff, ProposedChange } from "../core/diffPreview";
 
 const execAsync = util.promisify(child_process.exec);
 
@@ -54,7 +55,15 @@ function isWithinWorkspace(filePath: string): boolean {
 
 // ─── READ TOOLS (auto-execute, no approval needed) ───
 
-export async function toolReadFile(filePath: string): Promise<ToolResult> {
+/**
+ * Smart file reading — supports:
+ * - Full file: readFile("src/main.ts")
+ * - Line range: readFile("src/main.ts", "10-50")
+ * - Symbol: readFile("src/main.ts", "className") or readFile("src/main.ts", "functionName")
+ * 
+ * For large files, automatically shows a summary with line numbers instead of dumping everything.
+ */
+export async function toolReadFile(filePath: string, rangeOrSymbol?: string): Promise<ToolResult> {
   const id = `tr_${Date.now()}`;
   try {
     if (!isWithinWorkspace(filePath)) {
@@ -62,15 +71,111 @@ export async function toolReadFile(filePath: string): Promise<ToolResult> {
     }
     const resolved = resolvePath(filePath);
     const content = await fs.readFile(resolved, "utf8");
-    const truncated = content.length > 50_000;
-    return {
-      id, tool: "readFile", success: true,
-      output: truncated ? content.substring(0, 50_000) + "\n\n... (truncated)" : content,
-      truncated
-    };
+    const lines = content.split("\n");
+
+    // Line range: "10-50" or "10"
+    if (rangeOrSymbol && /^\d+(-\d+)?$/.test(rangeOrSymbol)) {
+      const parts = rangeOrSymbol.split("-");
+      const start = Math.max(0, parseInt(parts[0], 10) - 1);
+      const end = parts[1] ? Math.min(lines.length, parseInt(parts[1], 10)) : start + 1;
+      const slice = lines.slice(start, end);
+      const numbered = slice.map((l, i) => `${start + i + 1}: ${l}`).join("\n");
+      return { id, tool: "readFile", success: true, output: `Lines ${start + 1}-${end} of ${filePath} (${lines.length} total):\n\n${numbered}` };
+    }
+
+    // Symbol search: find a function/class/method by name
+    if (rangeOrSymbol && !/^\d/.test(rangeOrSymbol)) {
+      const symbol = rangeOrSymbol.trim();
+      const symbolPatterns = [
+        new RegExp(`^\\s*(export\\s+)?(async\\s+)?function\\s+${symbol}`, "m"),
+        new RegExp(`^\\s*(export\\s+)?(abstract\\s+)?class\\s+${symbol}`, "m"),
+        new RegExp(`^\\s*(export\\s+)?interface\\s+${symbol}`, "m"),
+        new RegExp(`^\\s*(public|private|protected|static|async).*\\s+${symbol}\\s*\\(`, "m"),
+        new RegExp(`^\\s*(export\\s+)?(const|let|var)\\s+${symbol}`, "m"),
+      ];
+
+      for (const pat of symbolPatterns) {
+        const match = content.match(pat);
+        if (match && match.index !== undefined) {
+          const startLine = content.substring(0, match.index).split("\n").length - 1;
+          // Find the end of the symbol (next function/class or end of file)
+          const endLine = findSymbolEnd(lines, startLine);
+          const slice = lines.slice(startLine, endLine);
+          const numbered = slice.map((l, i) => `${startLine + i + 1}: ${l}`).join("\n");
+          return { id, tool: "readFile", success: true, output: `Symbol "${symbol}" in ${filePath} (lines ${startLine + 1}-${endLine}):\n\n${numbered}` };
+        }
+      }
+      return { id, tool: "readFile", success: false, output: `Symbol "${symbol}" not found in ${filePath}. Available symbols:\n${extractSymbols(lines).join("\n")}` };
+    }
+
+    // Full file — but smart: if large, show outline + first/last sections
+    if (lines.length > 100) {
+      const outline = extractSymbols(lines);
+      const head = lines.slice(0, 40).map((l, i) => `${i + 1}: ${l}`).join("\n");
+      const tail = lines.slice(-20).map((l, i) => `${lines.length - 20 + i + 1}: ${l}`).join("\n");
+      return {
+        id, tool: "readFile", success: true,
+        output: `${filePath} (${lines.length} lines)\n\n` +
+          `=== Outline ===\n${outline.join("\n")}\n\n` +
+          `=== First 40 lines ===\n${head}\n\n` +
+          `=== Last 20 lines ===\n${tail}\n\n` +
+          `[Use readFile with line range (e.g. "50-100") or symbol name to see specific sections]`,
+        truncated: true
+      };
+    }
+
+    // Small file — return as-is with line numbers
+    const numbered = lines.map((l, i) => `${i + 1}: ${l}`).join("\n");
+    return { id, tool: "readFile", success: true, output: numbered };
   } catch (err) {
     return { id, tool: "readFile", success: false, output: `Error: ${err instanceof Error ? err.message : String(err)}` };
   }
+}
+
+/** Find where a symbol definition ends (heuristic: matching braces or next top-level definition) */
+function findSymbolEnd(lines: string[], startLine: number): number {
+  let braceDepth = 0;
+  let started = false;
+
+  for (let i = startLine; i < lines.length; i++) {
+    const line = lines[i];
+    for (const ch of line) {
+      if (ch === "{") { braceDepth++; started = true; }
+      if (ch === "}") { braceDepth--; }
+    }
+    // Symbol ended when braces balance back to 0
+    if (started && braceDepth <= 0) {
+      return Math.min(i + 2, lines.length); // include closing brace + 1 blank line
+    }
+    // Safety: don't read more than 80 lines for one symbol
+    if (i - startLine > 80) return i;
+  }
+  return Math.min(startLine + 40, lines.length);
+}
+
+/** Extract top-level symbols (functions, classes, interfaces) with line numbers */
+function extractSymbols(lines: string[]): string[] {
+  const symbols: string[] = [];
+  const patterns = [
+    /^\s*(export\s+)?(async\s+)?function\s+(\w+)/,
+    /^\s*(export\s+)?(abstract\s+)?class\s+(\w+)/,
+    /^\s*(export\s+)?interface\s+(\w+)/,
+    /^\s*(export\s+)?(const|let|var)\s+(\w+)\s*[:=]/,
+  ];
+
+  for (let i = 0; i < lines.length; i++) {
+    for (const pat of patterns) {
+      const m = lines[i].match(pat);
+      if (m) {
+        const name = m[m.length - 1] || m[3] || m[2];
+        if (name && name.length > 1) {
+          symbols.push(`  L${i + 1}: ${lines[i].trim().substring(0, 80)}`);
+          break;
+        }
+      }
+    }
+  }
+  return symbols.slice(0, 30); // cap at 30 symbols
 }
 
 export async function toolListDirectory(dirPath: string, depth = 2): Promise<ToolResult> {
@@ -184,11 +289,29 @@ export async function toolWriteFile(filePath: string, content: string): Promise<
       return { id, tool: "writeFile", success: false, output: "Error: Path is outside workspace." };
     }
     const resolved = resolvePath(filePath);
+    const agenticMode = vscode.workspace.getConfiguration("explicitAI").get<boolean>("agenticMode", true);
+
+    // In supervised mode, show diff preview
+    if (!agenticMode) {
+      let originalContent = "";
+      try { originalContent = await fs.readFile(resolved, "utf8"); } catch { /* new file */ }
+      const change: ProposedChange = {
+        filePath: resolved,
+        relativePath: filePath,
+        originalContent,
+        proposedContent: content,
+        isNew: !originalContent
+      };
+      const accepted = await showDiff(change);
+      if (!accepted) {
+        return { id, tool: "writeFile", success: false, output: "Change rejected by user." };
+      }
+    }
+
     await fileTracker.recordChange(resolved, content);
     await fs.mkdir(path.dirname(resolved), { recursive: true });
     await fs.writeFile(resolved, content, "utf8");
 
-    // Open the file in editor so user can see what was written
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved));
     await vscode.window.showTextDocument(doc, { preview: true });
 
@@ -352,10 +475,11 @@ export interface ToolDefinition {
 export const BUILTIN_TOOLS: ToolDefinition[] = [
   {
     name: "readFile",
-    description: "Read the contents of a file in the workspace",
+    description: "Read file contents. For large files shows outline + key sections. Use 'range' for specific lines or symbol name.",
     category: "read",
     parameters: {
-      path: { type: "string", description: "Relative path to the file", required: true }
+      path: { type: "string", description: "Relative path to the file", required: true },
+      range: { type: "string", description: "Line range (e.g. '10-50') or symbol name (e.g. 'MyClass', 'handleLogin')", required: false }
     }
   },
   {
@@ -447,7 +571,7 @@ export const BUILTIN_TOOLS: ToolDefinition[] = [
 export async function executeBuiltinTool(call: ToolCall): Promise<ToolResult> {
   switch (call.tool) {
     case "readFile":
-      return toolReadFile(call.args.path ?? "");
+      return toolReadFile(call.args.path ?? "", call.args.range);
     case "listDir":
       return toolListDirectory(call.args.path, parseInt(call.args.depth ?? "2", 10));
     case "search":
@@ -494,7 +618,7 @@ Or simply say "Let me read src/main.ts" and the tool will execute automatically.
 AVAILABLE TOOLS:
 
 READ (auto-execute, no approval needed):
-- readFile: Read file contents. Args: path (relative to workspace root)
+- readFile: Read file contents. Args: path, range (optional: line range like "10-50" or symbol name like "MyClass")
 - listDir: List directory tree. Args: path (default "."), depth (default 2)
 - search: Search text in files (grep). Args: query, filePattern (optional, e.g. "*.ts")
 - findFiles: Find files by glob. Args: pattern (e.g. "**/*.test.ts")

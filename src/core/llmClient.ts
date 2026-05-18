@@ -63,13 +63,16 @@ export class LLMClient {
         if (lastError.message.includes("stopped") || lastError.message.includes("aborted")) {
           throw lastError;
         }
-        // Don't retry on 4xx errors (bad request, not found, etc.)
-        if (lastError.message.includes("(4")) {
+        // Don't retry on 4xx errors EXCEPT 429 (rate limit)
+        if (lastError.message.includes("(4") && !lastError.message.includes("(429")) {
           throw lastError;
         }
         if (attempt < maxRetries) {
-          // Exponential backoff: 1s, 2s
-          const delay = 1000 * Math.pow(2, attempt);
+          // Rate limit: use longer backoff. Others: standard backoff.
+          const isRateLimit = lastError.message.includes("429");
+          const delay = isRateLimit
+            ? 5000 * Math.pow(2, attempt) // 5s, 10s for rate limits
+            : 1000 * Math.pow(2, attempt); // 1s, 2s for other errors
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
@@ -84,7 +87,18 @@ export class LLMClient {
     this.activeAbort = controller;
     const signal = options.signal ?? controller.signal;
 
-    const timeout = setTimeout(() => controller.abort(), cfg.requestTimeoutMs);
+    // Adaptive timeout: estimate based on token count
+    // Local models: ~32 tok/sec prompt eval + ~7 tok/sec generation
+    // Add generous buffer for slow hardware
+    const inputChars = options.messages.reduce((sum, m) => sum + m.content.length, 0);
+    const estimatedInputTokens = Math.ceil(inputChars / 3.5);
+    const estimatedPromptTime = (estimatedInputTokens / 20) * 1000; // assume 20 tok/sec (conservative)
+    const estimatedGenTime = ((cfg.maxTokens || 4096) / 5) * 1000; // assume 5 tok/sec generation
+    const adaptiveTimeout = Math.max(
+      cfg.requestTimeoutMs,
+      estimatedPromptTime + estimatedGenTime + 30000 // +30s buffer
+    );
+    const timeout = setTimeout(() => controller.abort(), adaptiveTimeout);
 
     try {
       const body = {
@@ -95,9 +109,21 @@ export class LLMClient {
         max_tokens: options.maxTokens ?? cfg.maxTokens
       };
 
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json"
+      };
+      if (cfg.apiKey) {
+        headers["Authorization"] = `Bearer ${cfg.apiKey}`;
+      }
+      // OpenRouter requires these additional headers
+      if (cfg.apiUrl.includes("openrouter.ai")) {
+        headers["HTTP-Referer"] = "https://github.com/kelvin-danga/explicit-ai-assistant";
+        headers["X-Title"] = "Explicit AI Assistant";
+      }
+
       const res = await fetch(cfg.apiUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
         signal
       });

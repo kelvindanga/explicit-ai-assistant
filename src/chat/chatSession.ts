@@ -6,7 +6,7 @@ import { LLMClient, ChatMessage } from "../core/llmClient";
 import { fetchAvailableModels, ModelInfo } from "../core/modelRegistry";
 import { executeMcpTool, isToolEnabled } from "../mcp/mcpExecutor";
 import { McpToolId, McpToolRequest } from "../mcp/types";
-import { truncateConversation, getTokenStats } from "../core/tokenBudget";
+import { truncateConversation, getTokenStats, estimateMessagesTokens } from "../core/tokenBudget";
 import { compactConversation, needsCompacting } from "../core/compactor";
 import { agentRegistry } from "../agents/agentRegistry";
 import { fileTracker } from "../core/fileTracker";
@@ -35,6 +35,7 @@ export class ChatSession {
   private llm = new LLMClient();
   private generating = false;
   private agentSystemPrompt: string | null = null;
+  private chainDepth = 0;
 
   /** Called after each successful AI response — used for auto-saving threads */
   onResponseComplete: (() => void) | null = null;
@@ -224,9 +225,33 @@ export class ChatSession {
       }
     }
 
+    // --- Parse @terminal mention (include recent terminal output) ---
+    let extraContext = pastedContext;
+    if (prompt.includes("@terminal")) {
+      const { terminalWatcher } = await import("../core/terminalWatcher");
+      const errors = terminalWatcher.getRecentErrors(5);
+      if (errors.length > 0) {
+        const terminalCtx = errors.map((e) => `[${e.terminal}] ${e.error}`).join("\n");
+        extraContext += (extraContext ? "\n\n" : "") + "=== Recent terminal output ===\n" + terminalCtx;
+      }
+      effectivePrompt = effectivePrompt.replace(/@terminal/g, "").trim();
+    }
+
+    // --- Parse @workspace mention (include project structure) ---
+    if (prompt.includes("@workspace") && root) {
+      try {
+        const { toolListDirectory } = await import("../tools/builtinTools");
+        const tree = await toolListDirectory(".", 2);
+        if (tree.success) {
+          extraContext += (extraContext ? "\n\n" : "") + "=== Workspace structure ===\n" + tree.output.substring(0, 2000);
+        }
+      } catch { /* skip */ }
+      effectivePrompt = effectivePrompt.replace(/@workspace/g, "").trim();
+    }
+
     const built = await ContextBuilder.buildAsync({
       userPrompt: effectivePrompt,
-      pastedContext,
+      pastedContext: extraContext,
       files: allFiles,
       mcpOutputs: this.mcpOutputs,
       agentPrompt: inlineAgentPrompt ?? this.agentSystemPrompt
@@ -271,6 +296,7 @@ export class ChatSession {
     files: AttachedFile[]
   ): Promise<void> {
     this.mcpOutputs = [];
+    this.chainDepth = 0; // Reset chain depth for new user message
     const userMsg: ChatMessageRecord = {
       id: `u_${Date.now()}`,
       role: "user",
@@ -312,6 +338,13 @@ export class ChatSession {
     this.bridge.post({ type: "tokenStats", ...stats });
 
     let full = "";
+    const inputTokens = estimateMessagesTokens(messages);
+    let outputTokens = 0;
+    const startTime = Date.now();
+
+    // Send initial stats so the UI can show them
+    this.bridge.post({ type: "streamStats", id: assistantId, inputTokens, outputTokens: 0, elapsed: 0 });
+
     try {
       full = await this.llm.completeWithEnglishGuard(
         {
@@ -323,7 +356,18 @@ export class ChatSession {
           ? {
               onToken: (chunk) => {
                 full += chunk;
+                outputTokens += Math.ceil(chunk.length / 3.5);
                 this.bridge.post({ type: "streamDelta", id: assistantId, chunk });
+                // Update token stats every ~10 tokens to avoid flooding
+                if (outputTokens % 10 < 3) {
+                  this.bridge.post({
+                    type: "streamStats",
+                    id: assistantId,
+                    inputTokens,
+                    outputTokens,
+                    elapsed: Math.round((Date.now() - startTime) / 1000)
+                  });
+                }
               },
               onDone: (text) => {
                 full = text;
@@ -332,6 +376,17 @@ export class ChatSession {
             }
           : undefined
       );
+
+      // Final stats
+      outputTokens = Math.ceil(full.length / 3.5);
+      this.bridge.post({
+        type: "streamStats",
+        id: assistantId,
+        inputTokens,
+        outputTokens,
+        elapsed: Math.round((Date.now() - startTime) / 1000),
+        done: true
+      });
 
       const record: ChatMessageRecord = {
         id: assistantId,
@@ -369,13 +424,33 @@ export class ChatSession {
       }
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err);
-      this.history.push({
-        id: assistantId,
-        role: "error",
-        content: text,
-        timestamp: Date.now()
-      });
-      this.bridge.post({ type: "error", id: assistantId, text });
+      const isTimeout = text.includes("stopped") || text.includes("abort") || text.includes("timeout");
+
+      // Save partial content if we received any tokens before the error
+      if (full.trim()) {
+        const partialRecord: ChatMessageRecord = {
+          id: assistantId,
+          role: "assistant",
+          content: full + "\n\n⚠️ _(response interrupted: " + (isTimeout ? "timeout" : "error") + ")_",
+          timestamp: Date.now(),
+          model
+        };
+        this.history.push(partialRecord);
+        this.conversation.push({ role: "assistant", content: full });
+        this.bridge.post({ type: "streamEnd", id: assistantId, message: partialRecord });
+
+        // Auto-save thread with partial content so nothing is lost
+        this.onResponseComplete?.();
+      } else {
+        // No content received at all — show error
+        this.history.push({
+          id: assistantId,
+          role: "error",
+          content: text,
+          timestamp: Date.now()
+        });
+        this.bridge.post({ type: "error", id: assistantId, text });
+      }
     } finally {
       this.generating = false;
     }
@@ -389,14 +464,17 @@ export class ChatSession {
     if (this.history.length === 0) return;
     const lastRole = this.history[this.history.length - 1]?.role;
     let removedAssistantId: string | undefined;
+    let removedUserPrompt = "";
     if (lastRole === "assistant" || lastRole === "error") {
       const removed = this.history.pop();
       if (removed?.role === "assistant") removedAssistantId = removed.id;
       if (this.history.length && this.history[this.history.length - 1].role === "user") {
-        this.history.pop();
+        const userMsg = this.history.pop();
+        removedUserPrompt = userMsg?.content ?? "";
       }
     } else {
-      this.history.pop();
+      const userMsg = this.history.pop();
+      removedUserPrompt = userMsg?.content ?? "";
     }
     this.conversation = this.history
       .filter((m) => m.role !== "error")
@@ -408,7 +486,7 @@ export class ChatSession {
       revertResult = await fileTracker.undoCheckpoint(removedAssistantId);
     }
 
-    this.bridge.post({ type: "undone", messages: this.history, reverted: revertResult?.reverted ?? [] });
+    this.bridge.post({ type: "undone", messages: this.history, reverted: revertResult?.reverted ?? [], lastPrompt: removedUserPrompt });
   }
 
   async undoFrom(messageId?: string): Promise<void> {
@@ -427,6 +505,10 @@ export class ChatSession {
     const removed = this.history.slice(idx);
     const assistantIds = removed.filter((m) => m.role === "assistant").map((m) => m.id);
 
+    // Capture the user prompt being undone (first removed message if it's a user message)
+    const removedUserMsg = removed.find((m) => m.role === "user");
+    const removedUserPrompt = removedUserMsg?.content ?? "";
+
     this.history = this.history.slice(0, idx);
     this.conversation = this.history
       .filter((m) => m.role !== "error")
@@ -441,7 +523,7 @@ export class ChatSession {
       }
     }
 
-    this.bridge.post({ type: "undone", messages: this.history, reverted: allReverted });
+    this.bridge.post({ type: "undone", messages: this.history, reverted: allReverted, lastPrompt: removedUserPrompt });
   }
 
   restoreFromHistory(messages: ChatMessageRecord[]): void {
@@ -515,6 +597,39 @@ export class ChatSession {
   }
 
   /**
+   * Truncate tool output to prevent flooding the context window.
+   * Small local models (2B-7B) have limited context — we cap tool output
+   * to ~2000 chars and summarize what was truncated.
+   */
+  private truncateToolOutput(output: string, tool: string): string {
+    const maxChars = 2000; // ~570 tokens — leaves room for the model to respond
+    if (output.length <= maxChars) return output;
+
+    const lines = output.split("\n");
+    const totalLines = lines.length;
+
+    // For file reads: show first and last portions
+    if (tool === "readFile") {
+      const headLines = lines.slice(0, 40).join("\n");
+      const tailLines = lines.slice(-10).join("\n");
+      const truncated = headLines.length + tailLines.length > maxChars
+        ? lines.slice(0, 30).join("\n")
+        : headLines + "\n\n... (" + (totalLines - 50) + " lines omitted) ...\n\n" + tailLines;
+      return truncated.substring(0, maxChars) + `\n\n[Truncated: file has ${totalLines} lines total. Use readFile with specific sections if needed.]`;
+    }
+
+    // For search/list: show first results
+    if (tool === "search" || tool === "listDir" || tool === "findFiles") {
+      const kept = output.substring(0, maxChars);
+      const keptLines = kept.split("\n").length;
+      return kept + `\n\n[Showing ${keptLines} of ${totalLines} results. Narrow your search for more specific results.]`;
+    }
+
+    // Default: hard truncate
+    return output.substring(0, maxChars) + `\n\n[Output truncated at ${maxChars} chars. Total: ${output.length} chars.]`;
+  }
+
+  /**
    * Detect built-in tool calls in the AI response.
    * Supports multiple formats:
    * 1. Structured: ```tool {"tool":"name","args":{}} ```
@@ -524,34 +639,75 @@ export class ChatSession {
   private detectBuiltinToolCalls(text: string): ToolCall[] {
     const calls: ToolCall[] = [];
 
-    // 1. Structured ```tool blocks (preferred)
+    // 1. Structured ```tool or ```json blocks
     const toolPattern = /```(?:tool|json)\s*\n?([\s\S]*?)```/g;
     let match: RegExpExecArray | null;
     while ((match = toolPattern.exec(text)) !== null) {
-      try {
-        const parsed = JSON.parse(match[1].trim());
-        if (parsed.tool && typeof parsed.tool === "string") {
-          const toolDef = BUILTIN_TOOLS.find((t) => t.name === parsed.tool);
-          if (toolDef) {
-            calls.push({
-              id: `tc_${Date.now()}_${calls.length}`,
-              tool: parsed.tool,
-              args: parsed.args ?? {},
-              category: toolDef.category,
-              description: `${parsed.tool}: ${JSON.stringify(parsed.args ?? {})}`
-            });
-          }
-        }
-      } catch {
-        // Not a tool call JSON, skip
-      }
+      this.tryParseToolCall(match[1].trim(), calls);
     }
-
     if (calls.length > 0) return calls;
 
-    // 2. Natural language detection (for models that don't produce structured output)
+    // 2. Unclosed tool block (model stopped after the JSON but before closing ```)
+    const unclosedPattern = /```(?:tool|json)\s*\n?([\s\S]+?)$/;
+    const unclosedMatch = text.match(unclosedPattern);
+    if (unclosedMatch) {
+      this.tryParseToolCall(unclosedMatch[1].trim(), calls);
+    }
+    if (calls.length > 0) return calls;
+
+    // 3. Bare JSON object with "tool" key (model didn't use backticks)
+    const bareJsonPattern = /\{\s*"tool"\s*:\s*"(\w+)"\s*,\s*"args"\s*:\s*(\{[^}]*\})\s*\}/g;
+    while ((match = bareJsonPattern.exec(text)) !== null) {
+      try {
+        const fullJson = match[0];
+        this.tryParseToolCall(fullJson, calls);
+      } catch { /* skip */ }
+    }
+    if (calls.length > 0) return calls;
+
+    // 4. Natural language detection (for models that don't produce structured output)
     const nlCalls = this.detectNaturalLanguageToolCalls(text);
     return nlCalls;
+  }
+
+  private tryParseToolCall(jsonStr: string, calls: ToolCall[]): void {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      if (parsed.tool && typeof parsed.tool === "string") {
+        // Normalize args to strings (models sometimes send numbers/booleans)
+        const args: Record<string, string> = {};
+        if (parsed.args && typeof parsed.args === "object") {
+          for (const [k, v] of Object.entries(parsed.args)) {
+            args[k] = String(v);
+          }
+        }
+
+        // Check if it's an MCP tool (format: "serverName/toolName")
+        if (parsed.tool.includes("/")) {
+          calls.push({
+            id: `tc_${Date.now()}_${calls.length}`,
+            tool: parsed.tool, // keep the full "server/tool" format
+            args,
+            category: "read", // MCP tools auto-execute in agentic mode
+            description: `MCP: ${parsed.tool}`
+          });
+          return;
+        }
+
+        const toolDef = BUILTIN_TOOLS.find((t) => t.name === parsed.tool);
+        if (toolDef) {
+          calls.push({
+            id: `tc_${Date.now()}_${calls.length}`,
+            tool: parsed.tool,
+            args,
+            category: toolDef.category,
+            description: `${parsed.tool}: ${JSON.stringify(args)}`
+          });
+        }
+      }
+    } catch {
+      // Not valid JSON, skip
+    }
   }
 
   /**
@@ -648,28 +804,49 @@ export class ChatSession {
 
   /**
    * Execute detected tool calls.
-   * Read tools auto-execute. Write/shell tools request approval via the UI.
+   * In agentic mode: ALL tools auto-execute (reads + writes) with undo tracking.
+   * In supervised mode: reads auto-execute, writes need approval.
+   * After each tool, the AI auto-continues to chain actions.
    */
   private async executeToolCalls(calls: ToolCall[]): Promise<void> {
+    const agenticMode = vscode.workspace.getConfiguration("explicitAI").get<boolean>("agenticMode", true);
+    const maxChainDepth = 10; // prevent infinite loops
+
     for (const call of calls) {
-      if (call.category === "read") {
-        // Auto-execute read tools
+      // Handle MCP tools (format: "serverName/toolName")
+      if (call.tool.includes("/")) {
+        const [serverName, toolName] = call.tool.split("/", 2);
+        this.bridge.post({ type: "toolExecuting", tool: call.tool, args: call.args });
+        try {
+          const { mcpManager } = await import("../mcp/mcpClient");
+          const output = await mcpManager.callTool(serverName, toolName, call.args);
+          const truncatedOutput = this.truncateToolOutput(output, call.tool);
+          this.bridge.post({ type: "builtinToolResult", result: { id: call.id, tool: call.tool, success: true, output: truncatedOutput } });
+          this.conversation.push({ role: "user", content: `[MCP tool result: ${call.tool}]\n${truncatedOutput}` });
+          this.mcpOutputs.push(`[${call.tool}]\n${truncatedOutput}`);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          this.bridge.post({ type: "builtinToolResult", result: { id: call.id, tool: call.tool, success: false, output: errMsg } });
+          this.conversation.push({ role: "user", content: `[MCP tool error: ${call.tool}] ${errMsg}` });
+        }
+        continue;
+      }
+
+      if (call.category === "read" || (agenticMode && call.category === "write")) {
+        // Auto-execute
         this.bridge.post({ type: "toolExecuting", tool: call.tool, args: call.args });
         const result = await executeBuiltinTool(call);
         this.bridge.post({ type: "builtinToolResult", result });
 
-        // Add result to conversation and continue
+        // Add result to conversation
+        const truncatedOutput = this.truncateToolOutput(result.output, call.tool);
         this.conversation.push({
           role: "user",
-          content: `[Tool result: ${call.tool}]\n${result.output}`
+          content: `[Tool result: ${call.tool}]\n${truncatedOutput}`
         });
-        this.mcpOutputs.push(`[${call.tool}]\n${result.output}`);
-
-        // Auto-continue: run completion again so the AI can use the result
-        await this.runCompletion();
-        return; // runCompletion handles the rest
+        this.mcpOutputs.push(`[${call.tool}]\n${truncatedOutput}`);
       } else {
-        // Write/shell tools need approval
+        // Supervised mode: write/shell tools need approval
         this.bridge.post({
           type: "builtinToolApproval",
           id: call.id,
@@ -678,7 +855,19 @@ export class ChatSession {
           category: call.category,
           description: call.description
         });
+        return; // Stop chaining — wait for user approval
       }
+    }
+
+    // Auto-continue: let the AI chain more actions (with rate limit delay)
+    if (this.chainDepth < maxChainDepth) {
+      this.chainDepth++;
+      // Add delay between chain steps to avoid rate limiting on cloud APIs
+      await new Promise((r) => setTimeout(r, 1000));
+      await this.runCompletion();
+    } else {
+      this.chainDepth = 0;
+      this.bridge.post({ type: "chainLimitReached" });
     }
   }
 
@@ -719,12 +908,13 @@ export class ChatSession {
       }
     }
 
-    // Add to conversation context
+    // Add to conversation context — truncate for small models
+    const truncatedOutput = this.truncateToolOutput(result.output, tool);
     this.conversation.push({
       role: "user",
-      content: `[Tool result: ${tool}]\n${result.output}`
+      content: `[Tool result: ${tool}]\n${truncatedOutput}`
     });
-    this.mcpOutputs.push(`[${tool}]\n${result.output}`);
+    this.mcpOutputs.push(`[${tool}]\n${truncatedOutput}`);
 
     // Continue the conversation with the tool result
     await this.runCompletion();

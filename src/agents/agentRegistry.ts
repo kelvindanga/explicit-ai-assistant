@@ -102,21 +102,150 @@ export class AgentRegistry {
   private agents: AgentConfig[] = [];
 
   async load(workspaceRoot: string): Promise<void> {
+    this.agents = [];
+
+    // Load from workspace .explicitai/agents/
     const dir = path.join(workspaceRoot, AGENTS_DIR);
+    await this.loadFromDir(dir);
+
+    // Load from external agent paths configured in settings
+    const externalPaths = vscode.workspace.getConfiguration("explicitAI").get<string[]>("agentPaths", []);
+    for (const extPath of externalPaths) {
+      if (extPath.trim()) {
+        await this.loadFromDir(extPath.trim());
+      }
+    }
+  }
+
+  private async loadFromDir(dir: string): Promise<void> {
     try {
+      const stat = await fs.stat(dir);
+      if (stat.isFile()) {
+        if (dir.endsWith(".json")) {
+          await this.loadJsonAgent(dir);
+        } else if (dir.endsWith(".md")) {
+          await this.loadMarkdownAgent(dir);
+        }
+        return;
+      }
+
+      // Directory — load all JSON and MD files
       const files = await fs.readdir(dir);
-      this.agents = [];
       for (const f of files) {
-        if (!f.endsWith(".json")) continue;
-        try {
-          const raw = await fs.readFile(path.join(dir, f), "utf8");
-          const agent = JSON.parse(raw) as AgentConfig;
-          if (agent.id && agent.name) this.agents.push(agent);
-        } catch { /* skip invalid */ }
+        if (f.endsWith(".json")) {
+          await this.loadJsonAgent(path.join(dir, f));
+        } else if (f.endsWith(".md")) {
+          await this.loadMarkdownAgent(path.join(dir, f));
+        }
       }
     } catch {
-      this.agents = [];
+      // Directory doesn't exist — that's fine
     }
+  }
+
+  private async loadJsonAgent(filePath: string): Promise<void> {
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      const agent = JSON.parse(raw) as AgentConfig;
+      if (agent.id && agent.name && !this.agents.some((a) => a.id === agent.id)) {
+        this.agents.push(agent);
+      }
+    } catch { /* skip invalid */ }
+  }
+
+  /**
+   * Load an agent from a Markdown file.
+   * Format:
+   *   # Agent Name
+   *   Description text (first paragraph)
+   *   
+   *   ## System Prompt (or rest of file)
+   *   The actual system prompt content...
+   */
+  private async loadMarkdownAgent(filePath: string): Promise<void> {
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      const lines = raw.split("\n");
+
+      // Extract name from first # heading or filename
+      let name = "";
+      let description = "";
+      let systemPromptStart = 0;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!name && line.startsWith("# ")) {
+          name = line.slice(2).trim();
+          systemPromptStart = i + 1;
+          continue;
+        }
+        // First non-empty line after the title is the description
+        if (name && !description && line && !line.startsWith("#")) {
+          description = line;
+          systemPromptStart = i + 1;
+          continue;
+        }
+        // If we hit a ## heading, everything after is the system prompt
+        if (line.startsWith("## ")) {
+          systemPromptStart = i + 1;
+          break;
+        }
+      }
+
+      if (!name) {
+        // Use filename as name
+        name = path.basename(filePath, ".md").replace(/[-_]/g, " ");
+      }
+
+      const systemPrompt = lines.slice(systemPromptStart).join("\n").trim();
+      if (!systemPrompt) return; // No content = skip
+
+      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      if (!this.agents.some((a) => a.id === id)) {
+        this.agents.push({ id, name, description, systemPrompt });
+      }
+    } catch { /* skip invalid */ }
+  }
+
+  /** Import an agent from an external path (file or directory) */
+  async importFromPath(externalPath: string, workspaceRoot: string): Promise<AgentConfig[]> {
+    const imported: AgentConfig[] = [];
+    try {
+      const stat = await fs.stat(externalPath);
+      if (stat.isFile()) {
+        // Load the agent temporarily to get its config
+        const prevCount = this.agents.length;
+        if (externalPath.endsWith(".json")) {
+          await this.loadJsonAgent(externalPath);
+        } else if (externalPath.endsWith(".md")) {
+          await this.loadMarkdownAgent(externalPath);
+        }
+        // Save any newly loaded agents to workspace
+        const newAgents = this.agents.slice(prevCount);
+        for (const agent of newAgents) {
+          await this.save(workspaceRoot, agent);
+          imported.push(agent);
+        }
+      } else if (stat.isDirectory()) {
+        const files = await fs.readdir(externalPath);
+        for (const f of files) {
+          if (!f.endsWith(".json") && !f.endsWith(".md")) continue;
+          const prevCount = this.agents.length;
+          const filePath = path.join(externalPath, f);
+          if (f.endsWith(".json")) {
+            await this.loadJsonAgent(filePath);
+          } else {
+            await this.loadMarkdownAgent(filePath);
+          }
+          const newAgents = this.agents.slice(prevCount);
+          for (const agent of newAgents) {
+            await this.save(workspaceRoot, agent);
+            imported.push(agent);
+          }
+        }
+      }
+    } catch { /* path doesn't exist */ }
+    return imported;
   }
 
   /** Get all agents: user-defined + built-in */

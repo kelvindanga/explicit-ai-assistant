@@ -49,11 +49,16 @@
       <button type="button" class="mode-switch-btn" id="modeSwitchBtn" title="Switch mode">Switch</button>
     </div>
 
+    <div class="exec-mode-bar" id="execModeBar">
+      <button type="button" class="exec-mode-btn active" id="agenticBtn" title="AI auto-executes all actions (with undo)">⚡ Agentic</button>
+      <button type="button" class="exec-mode-btn" id="supervisedBtn" title="AI asks before writing files">🛡 Supervised</button>
+    </div>
+
     <main class="thread" id="thread">
       <section class="welcome" id="welcome">
         <div class="onboarding-status" id="onboardingStatus">
           <div class="onboarding-icon" id="onboardingIcon">⏳</div>
-          <div class="onboarding-text" id="onboardingText">Checking LM Studio connection...</div>
+          <div class="onboarding-text" id="onboardingText">Checking connection...</div>
         </div>
         <h2>Choose your workflow</h2>
         <p>Pick a mode that matches how you want to work.</p>
@@ -70,7 +75,7 @@
           </button>
         </div>
         <div class="onboarding-hint">
-          <p>💡 Make sure <strong>LM Studio</strong> is running at <code>localhost:1234</code> with a model loaded.</p>
+          <p>💡 Configure your AI provider in settings. Works with any OpenAI-compatible API.</p>
           <p>Use <kbd>Ctrl+Shift+A</kbd> to open chat anytime.</p>
         </div>
       </section>
@@ -94,7 +99,10 @@
         <button type="button" class="link-btn" id="agentsClose">Close</button>
       </div>
       <div class="agents-list" id="agentsList"></div>
-      <button type="button" class="btn primary agent-add-btn" id="addAgentBtn">+ Add Agent</button>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <button type="button" class="btn primary agent-add-btn" id="addAgentBtn" style="flex:1;">+ Add Agent</button>
+        <button type="button" class="btn secondary agent-add-btn" id="importAgentBtn" style="flex:1;">📂 Import</button>
+      </div>
     </section>
 
     <!-- Plan panel -->
@@ -126,7 +134,7 @@
     <section class="payload-modal hidden" id="payloadModal">
       <div class="payload-card">
         <h3>Payload preview</h3>
-        <p class="payload-hint">Review exactly what will be sent to LM Studio.</p>
+        <p class="payload-hint">Review exactly what will be sent to the AI model.</p>
         <pre class="payload-pre" id="payloadPre"></pre>
         <div class="payload-actions">
           <button type="button" class="btn secondary" id="payloadCancel">Cancel</button>

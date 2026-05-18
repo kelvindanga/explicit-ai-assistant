@@ -75,7 +75,7 @@ export class ModelHealthCheck {
     this.updateDisplay("checking");
   }
 
-  start(intervalMs = 30_000): void {
+  start(intervalMs = 60_000): void {
     this.check();
     this.timer = setInterval(() => this.check(), intervalMs);
   }
@@ -110,7 +110,8 @@ export class ModelHealthCheck {
       const timeout = setTimeout(() => controller.abort(), 5000);
       const res = await fetch(cfg.modelsUrl, {
         method: "GET",
-        signal: controller.signal
+        signal: controller.signal,
+        headers: cfg.apiKey ? { "Authorization": `Bearer ${cfg.apiKey}` } : {}
       });
       clearTimeout(timeout);
 
