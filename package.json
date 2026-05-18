@@ -61,6 +61,11 @@
           "default": "http://localhost:1234/v1/models",
           "description": "Models list endpoint (GET)."
         },
+        "explicitAI.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for cloud providers (OpenAI, Anthropic, Groq, NVIDIA, Together, etc.). Leave empty for local models."
+        },
         "explicitAI.defaultModel": {
           "type": "string",
           "default": "meta-llama-3.1-8b-instruct",
@@ -123,8 +128,8 @@
         },
         "explicitAI.requestTimeoutMs": {
           "type": "number",
-          "default": 120000,
-          "description": "Request timeout in milliseconds."
+          "default": 300000,
+          "description": "Request timeout in milliseconds. Default 5 minutes — increase for slow local models."
         },
         "explicitAI.showPayloadPreview": {
           "type": "boolean",
@@ -135,6 +140,27 @@
           "type": "boolean",
           "default": false,
           "description": "Enable MCP tools (each action still requires approval)."
+        },
+        "explicitAI.agentPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "External paths to load agents from (directories or JSON files). e.g. C:\\Projects\\Agents\\BackendAgent"
+        },
+        "explicitAI.inlineCompletions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline code completions (autocomplete as you type)."
+        },
+        "explicitAI.agenticMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Agentic mode: AI auto-executes write tools without asking (with undo support). Disable for supervised mode where writes need approval."
+        },
+        "explicitAI.terminalWatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Watch terminal output for errors and suggest fixes automatically."
         },
         "explicitAI.mcpFilesystem": {
           "type": "boolean",
@@ -243,6 +269,16 @@
         "command": "explicitAI.newSession",
         "title": "Explicit AI: New Session",
         "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.inlineChat",
+        "title": "Explicit AI: Inline Chat (Edit Code)",
+        "category": "Explicit AI"
+      },
+      {
+        "command": "explicitAI.autoFix",
+        "title": "Explicit AI: Auto-Fix Errors",
+        "category": "Explicit AI"
       }
     ],
     "menus": {
@@ -267,6 +303,14 @@
         {
           "command": "explicitAI.generateDocs",
           "group": "explicitAI@5"
+        },
+        {
+          "command": "explicitAI.inlineChat",
+          "group": "explicitAI@6"
+        },
+        {
+          "command": "explicitAI.autoFix",
+          "group": "explicitAI@7"
         }
       ],
       "commandPalette": [
@@ -287,6 +331,8 @@
         { "command": "explicitAI.generatePrDescription" },
         { "command": "explicitAI.generateDocs" },
         { "command": "explicitAI.askWorkspace" },
+        { "command": "explicitAI.inlineChat" },
+        { "command": "explicitAI.autoFix" },
         { "command": "explicitAI.newSession" }
       ]
     },
@@ -334,6 +380,18 @@
         "command": "explicitAI.newSession",
         "key": "ctrl+shift+n",
         "mac": "cmd+shift+n"
+      },
+      {
+        "command": "explicitAI.inlineChat",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "explicitAI.autoFix",
+        "key": "ctrl+shift+.",
+        "mac": "cmd+shift+.",
+        "when": "editorTextFocus"
       }
     ]
   },

@@ -30,6 +30,7 @@ type Inbound =
   | { type: "mcpRun"; tool: McpToolId; args: Record<string, string> }
   | { type: "dropPaths"; paths: string[] }
   | { type: "setMode"; mode: WorkflowMode }
+  | { type: "setExecMode"; mode: "agentic" | "supervised" }
   | { type: "getThreads" }
   | { type: "switchThread"; threadId: string }
   | { type: "revertThread"; threadId: string }
@@ -37,6 +38,7 @@ type Inbound =
   | { type: "renameThread"; threadId: string; label: string }
   | { type: "getAgents" }
   | { type: "addAgent" }
+  | { type: "importAgent" }
   | { type: "selectAgent"; agentId: string }
   | { type: "removeAgent"; agentId: string }
   | { type: "openMcpConfig" }
@@ -102,6 +104,11 @@ export class ChatHost {
   /** Called by extension when active editor changes */
   notifyActiveFile(fsPath: string, relativeName: string): void {
     this.webview.postMessage({ type: "activeFile", path: fsPath, name: relativeName });
+  }
+
+  /** Called by terminal watcher when an error is detected */
+  notifyTerminalError(terminal: string, error: string): void {
+    this.webview.postMessage({ type: "terminalError", terminal, error });
   }
 
   private getWorkspaceRoot(): string | undefined {
@@ -171,6 +178,9 @@ export class ChatHost {
         this.currentMode = msg.mode;
         this.autoSaveThread();
         break;
+      case "setExecMode":
+        void vscode.workspace.getConfiguration("explicitAI").update("agenticMode", msg.mode === "agentic", vscode.ConfigurationTarget.Workspace);
+        break;
       case "getThreads":
         await this.sendThreads();
         break;
@@ -191,6 +201,9 @@ export class ChatHost {
         break;
       case "addAgent":
         await this.promptAddAgent();
+        break;
+      case "importAgent":
+        await this.importAgentFromPath();
         break;
       case "selectAgent":
         this.activeAgentId = msg.agentId;
@@ -317,25 +330,56 @@ export class ChatHost {
   }
 
   private async checkAndReportHealth(): Promise<void> {
-    // Reuse the health check module's logic — just report status to webview
     const { getConfig } = await import("../core/config");
     const cfg = getConfig();
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(cfg.modelsUrl, { method: "GET", signal: controller.signal });
-      clearTimeout(timeout);
-      const status = res.ok ? "connected" : "disconnected";
-      // Detect engine name from URL
-      const url = cfg.lmStudioBaseUrl.toLowerCase();
+      // Try the models endpoint first, fall back to a HEAD on the API URL
+      const headers: Record<string, string> = {};
+      if (cfg.apiKey) headers["Authorization"] = `Bearer ${cfg.apiKey}`;
+      if (cfg.apiUrl.includes("openrouter.ai")) {
+        headers["HTTP-Referer"] = "https://github.com/kelvin-danga/explicit-ai-assistant";
+      }
+
+      let status: "connected" | "disconnected" = "disconnected";
       let engine = "AI Engine";
-      if (url.includes("localhost:1234") || url.includes("127.0.0.1:1234")) engine = "LM Studio";
-      else if (url.includes("localhost:11434") || url.includes("127.0.0.1:11434")) engine = "Ollama";
+
+      // Try models endpoint
+      try {
+        const res = await fetch(cfg.modelsUrl, { method: "GET", signal: controller.signal, headers });
+        if (res.ok) status = "connected";
+      } catch { /* models endpoint failed, try api url */ }
+
+      // If models endpoint failed, try a lightweight request to the API URL
+      if (status === "disconnected") {
+        try {
+          const controller2 = new AbortController();
+          const timeout2 = setTimeout(() => controller2.abort(), 5000);
+          const res = await fetch(cfg.apiUrl, { method: "POST", signal: controller2.signal, headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ model: cfg.defaultModel, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }) });
+          clearTimeout(timeout2);
+          // Even a 400 means the server is reachable
+          if (res.status < 500) status = "connected";
+        } catch { /* truly unreachable */ }
+      }
+
+      clearTimeout(timeout);
+
+      // Detect engine from the configured URL
+      const url = cfg.apiUrl.toLowerCase();
+      if (url.includes("openrouter.ai")) engine = "OpenRouter";
       else if (url.includes("openai.com")) engine = "OpenAI";
       else if (url.includes("api.groq.com")) engine = "Groq";
       else if (url.includes("api.together")) engine = "Together AI";
-      else if (url.includes("localhost:8080")) engine = "llama.cpp";
-      else { try { engine = new URL(cfg.lmStudioBaseUrl).hostname; } catch { /* */ } }
+      else if (url.includes("api.mistral.ai")) engine = "Mistral";
+      else if (url.includes("api.anthropic.com")) engine = "Anthropic";
+      else if (url.includes("integrate.api.nvidia.com")) engine = "NVIDIA";
+      else if (url.includes("api.deepseek.com")) engine = "DeepSeek";
+      else if (url.includes("localhost:1234") || url.includes("127.0.0.1:1234")) engine = "LM Studio";
+      else if (url.includes("localhost:11434") || url.includes("127.0.0.1:11434")) engine = "Ollama";
+      else if (url.includes("localhost")) engine = "Local AI";
+      else { try { engine = new URL(cfg.apiUrl).hostname; } catch { /* */ } }
+
       this.webview.postMessage({ type: "healthStatus", status, engine });
     } catch {
       this.webview.postMessage({ type: "healthStatus", status: "disconnected", engine: "AI Engine" });
@@ -493,6 +537,28 @@ export class ChatHost {
     }
   }
 
+  private async importAgentFromPath(): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: "Import Agent(s)",
+      filters: { "Agent Files": ["json", "md"], "All Files": ["*"] }
+    });
+    if (!uris?.length) return;
+
+    const root = this.getWorkspaceRoot();
+    if (!root) return;
+
+    const imported = await agentRegistry.importFromPath(uris[0].fsPath, root);
+    if (imported.length > 0) {
+      await this.sendAgents();
+      void vscode.window.showInformationMessage(`Imported ${imported.length} agent(s): ${imported.map((a) => a.name).join(", ")}`);
+    } else {
+      void vscode.window.showWarningMessage("No valid agent files found at that path.");
+    }
+  }
+
   private async applyAgent(agentId: string): Promise<void> {
     const root = this.getWorkspaceRoot();
     if (root) await agentRegistry.load(root);
@@ -537,13 +603,21 @@ export class ChatHost {
   private async sendMcpServers(): Promise<void> {
     const root = this.getWorkspaceRoot();
     if (!root) return;
+    const { mcpManager } = await import("../mcp/mcpClient");
     const config = await loadMcpConfig(root);
-    const servers = Object.entries(config.mcpServers).map(([name, srv]) => ({
-      name,
-      command: srv.command,
-      args: srv.args || [],
-      disabled: srv.disabled || false
-    }));
+
+    // Show both config and connection status
+    const servers = Object.entries(config.mcpServers).map(([name, srv]) => {
+      const connected = mcpManager.getConnectedServers().find((s) => s.name === name);
+      return {
+        name,
+        command: srv.command,
+        args: srv.args || [],
+        disabled: srv.disabled || false,
+        connected: connected?.ready || false,
+        toolCount: connected?.tools.length || 0
+      };
+    });
     this.webview.postMessage({ type: "mcpServers", servers });
   }
 
@@ -759,21 +833,77 @@ export class ChatHost {
   // --- File Suggestions for # autocomplete ---
   private async suggestFiles(query: string): Promise<void> {
     try {
-      let pattern: string;
+      let files: string[] = [];
+
       if (!query || query === "*") {
         // No query — show common source files
-        pattern = "**/*.{ts,tsx,js,jsx,py,cs,java,go,rs,vue,svelte,html,css,json,yaml,yml,md}";
-      } else if (query.includes("/") || query.includes("\\")) {
-        pattern = `**/${query}*`;
+        const uris = await vscode.workspace.findFiles(
+          "**/*.{ts,tsx,js,jsx,py,cs,java,go,rs,vue,svelte,html,css,json,yaml,yml,md,csproj,sln}",
+          "**/node_modules/**", 15
+        );
+        files = uris.map((u) => vscode.workspace.asRelativePath(u));
       } else {
-        pattern = `**/*${query}*`;
+        // Strategy 1: Exact substring match (most reliable)
+        const exactUris = await vscode.workspace.findFiles(`**/*${query}*`, "**/node_modules/**", 20);
+        files = exactUris.map((u) => vscode.workspace.asRelativePath(u));
+
+        // Strategy 2: If no exact matches, try case-insensitive by lowering the glob
+        if (files.length === 0) {
+          const lowerUris = await vscode.workspace.findFiles(`**/*${query.toLowerCase()}*`, "**/node_modules/**", 20);
+          files = lowerUris.map((u) => vscode.workspace.asRelativePath(u));
+        }
+
+        // Strategy 3: If still nothing, try fuzzy glob
+        if (files.length === 0 && query.length >= 3) {
+          const fuzzyGlob = "**/*" + query.split("").join("*") + "*";
+          const fuzzyUris = await vscode.workspace.findFiles(fuzzyGlob, "**/node_modules/**", 20);
+          files = fuzzyUris.map((u) => vscode.workspace.asRelativePath(u));
+        }
+
+        // Score and sort by relevance
+        if (files.length > 0) {
+          files = files
+            .map((f) => ({ path: f, score: this.fuzzyScore(query, f) }))
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 15)
+            .map((f) => f.path);
+        }
       }
-      const uris = await vscode.workspace.findFiles(pattern, "**/node_modules/**", 15);
-      const files = uris.map((u) => vscode.workspace.asRelativePath(u)).sort((a, b) => a.length - b.length);
+
       this.webview.postMessage({ type: "fileSuggestions", files });
     } catch {
       this.webview.postMessage({ type: "fileSuggestions", files: [] });
     }
+  }
+
+  /** Simple fuzzy scoring — higher = better match */
+  private fuzzyScore(query: string, target: string): number {
+    const q = query.toLowerCase();
+    const t = target.toLowerCase();
+    let score = 0;
+    let qi = 0;
+    let lastMatchIdx = -1;
+
+    for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+      if (t[ti] === q[qi]) {
+        score += 10;
+        // Bonus for consecutive matches
+        if (lastMatchIdx === ti - 1) score += 5;
+        // Bonus for matching at word boundaries (after / . - _)
+        if (ti === 0 || "/.-_".includes(t[ti - 1])) score += 8;
+        // Bonus for matching uppercase (camelCase boundaries)
+        if (target[ti] === target[ti].toUpperCase() && target[ti] !== target[ti].toLowerCase()) score += 5;
+        lastMatchIdx = ti;
+        qi++;
+      }
+    }
+
+    // Penalize long paths (prefer shorter, more specific matches)
+    score -= target.length * 0.5;
+    // Bonus if all query chars were found
+    if (qi === q.length) score += 20;
+
+    return score;
   }
 
   // --- Agile: Detailed Tasks ---

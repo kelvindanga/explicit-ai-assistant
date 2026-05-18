@@ -6,9 +6,12 @@ export interface ModelInfo {
 }
 
 export async function fetchAvailableModels(): Promise<ModelInfo[]> {
-  const { modelsUrl } = getConfig();
+  const { modelsUrl, apiKey } = getConfig();
   try {
-    const res = await fetch(modelsUrl, { method: "GET" });
+    const res = await fetch(modelsUrl, {
+      method: "GET",
+      headers: apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}
+    });
     if (!res.ok) {
       return fallbackModels();
     }

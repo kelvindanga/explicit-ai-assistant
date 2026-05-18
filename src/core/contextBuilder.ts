@@ -4,6 +4,8 @@ import { buildSystemPrompt, buildSystemPromptWithMcpServers } from "./promptGuar
 import { getStackContext } from "./stackDetector";
 import { projectMemory } from "./memory";
 import { planManager } from "./planner";
+import { estimateMessagesTokens, getContextLimit } from "./tokenBudget";
+import { getConfig } from "./config";
 
 export interface BuildPayloadInput {
   userPrompt: string;
@@ -60,32 +62,69 @@ export class ContextBuilder {
     const files = input.files ?? [];
     const mcpOutputs = input.mcpOutputs ?? [];
     const fileBlock = formatFilesForContext(files);
+    const contextLimit = getContextLimit();
+    const cfg = getConfig();
 
     const sections: string[] = [];
     if (fileBlock) {
-      sections.push("=== Explicitly attached files (only these) ===\n" + fileBlock);
+      sections.push("=== Attached files ===\n" + fileBlock);
     }
     if (pasted) {
-      sections.push("=== User-pasted context ===\n" + pasted);
+      sections.push("=== Context ===\n" + pasted);
     }
     if (mcpOutputs.length) {
       sections.push(
-        "=== Approved MCP tool outputs ===\n" + mcpOutputs.join("\n\n---\n\n")
+        "=== Tool outputs ===\n" + mcpOutputs.join("\n\n---\n\n")
       );
     }
-    sections.push("=== User message ===\n" + input.userPrompt.trim());
+    sections.push(input.userPrompt.trim());
 
-    const finalUserMessage = sections.join("\n\n");
+    let finalUserMessage = sections.join("\n\n");
 
-    const messages: ChatMessage[] = [
+    let messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
       { role: "user", content: finalUserMessage }
     ];
 
+    // Token-aware trimming: if we're over budget, progressively strip context
+    let tokens = estimateMessagesTokens(messages);
+    if (tokens > contextLimit * 0.85) {
+      // Step 1: Truncate attached file content
+      if (fileBlock && fileBlock.length > 1000) {
+        const trimmedFiles = files.map((f) => ({
+          ...f,
+          content: f.content.length > 500
+            ? f.content.substring(0, 500) + `\n... (${f.content.length} chars total, truncated to fit context)`
+            : f.content
+        }));
+        const trimmedFileBlock = formatFilesForContext(trimmedFiles);
+        const trimmedSections = [];
+        if (trimmedFileBlock) trimmedSections.push("=== Attached files (trimmed) ===\n" + trimmedFileBlock);
+        if (pasted && pasted.length <= 500) trimmedSections.push(pasted);
+        if (mcpOutputs.length) trimmedSections.push("=== Tool outputs ===\n" + mcpOutputs.map((o) => o.substring(0, 300)).join("\n---\n"));
+        trimmedSections.push(input.userPrompt.trim());
+        finalUserMessage = trimmedSections.join("\n\n");
+        messages = [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: finalUserMessage }
+        ];
+        tokens = estimateMessagesTokens(messages);
+      }
+
+      // Step 2: If still over, use a minimal system prompt
+      if (tokens > contextLimit * 0.85) {
+        const minimalSystem = cfg.systemPrompt.trim() + "\n\nYou have tools: readFile, listDir, search, findFiles, writeFile, editFile, insertAt, deleteFile, runCommand. Use ```tool JSON format to invoke them.";
+        messages = [
+          { role: "system", content: minimalSystem },
+          { role: "user", content: input.userPrompt.trim() }
+        ];
+      }
+    }
+
     return {
       messages,
       displayPayload: {
-        systemPrompt,
+        systemPrompt: messages[0].content,
         userPrompt: input.userPrompt.trim(),
         pastedContext: pasted,
         attachedFiles: files.map((f) => ({
@@ -94,7 +133,7 @@ export class ContextBuilder {
           size: f.content.length
         })),
         mcpOutputs,
-        finalUserMessage,
+        finalUserMessage: messages[messages.length - 1].content,
         messageCount: messages.length
       }
     };

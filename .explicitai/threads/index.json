@@ -1,0 +1,28 @@
+{
+  "threads": [
+    {
+      "id": "thread_1779027207490",
+      "label": "hallo",
+      "timestamp": 1779027207490,
+      "lastActivity": 1779027207490,
+      "messageCount": 2,
+      "messages": [
+        {
+          "id": "u_1779027159156",
+          "role": "user",
+          "content": "hallo",
+          "timestamp": 1779027159156
+        },
+        {
+          "id": "a_1779027159157",
+          "role": "assistant",
+          "content": "Hello! Is there something specific you'd like to work on or discuss? Perhaps we can start by reviewing the project context and available tools. What's on your mind?",
+          "timestamp": 1779027207487,
+          "model": "meta-llama-3.1-8b-instruct"
+        }
+      ],
+      "mode": "vibe"
+    }
+  ],
+  "activeThreadId": "thread_1779027207490"
+}

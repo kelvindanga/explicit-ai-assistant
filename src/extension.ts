@@ -8,6 +8,8 @@ import { generateTests } from "./commands/generateTests";
 import { generatePrDescription } from "./commands/generatePrDescription";
 import { generateDocs } from "./commands/generateDocs";
 import { askWorkspace } from "./commands/askWorkspace";
+import { inlineChat } from "./commands/inlineChat";
+import { autoFixLoop } from "./commands/autoFix";
 import { getConfig, onConfigChange, SidebarPlacement } from "./core/config";
 import { ChatHost } from "./ui/chatHost";
 import { ChatPanel } from "./ui/chatPanel";
@@ -18,11 +20,16 @@ import { openMcpConfigInEditor } from "./mcp/mcpConfig";
 import { ModelHealthCheck } from "./core/healthCheck";
 import { projectMemory } from "./core/memory";
 import { planManager } from "./core/planner";
+import { InlineCompletionProvider } from "./completions/inlineProvider";
+import { terminalWatcher } from "./core/terminalWatcher";
+import { registerDiffProvider } from "./core/diffPreview";
+import { mcpManager } from "./mcp/mcpClient";
 
 export function activate(context: vscode.ExtensionContext): void {
   const chatProvider = new ChatViewProvider(context.extensionUri);
   const healthCheck = new ModelHealthCheck();
   healthCheck.start();
+  registerDiffProvider(context);
 
   // Initialize agents and threads from workspace
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -31,6 +38,7 @@ export function activate(context: vscode.ExtensionContext): void {
     void threadManager.load(root);
     void projectMemory.load(root);
     void planManager.load(root);
+    void mcpManager.loadAndConnect(root);
   }
 
   context.subscriptions.push(
@@ -90,6 +98,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("explicitAI.generatePrDescription", generatePrDescription),
     vscode.commands.registerCommand("explicitAI.generateDocs", generateDocs),
     vscode.commands.registerCommand("explicitAI.askWorkspace", askWorkspace),
+    vscode.commands.registerCommand("explicitAI.inlineChat", inlineChat),
+    vscode.commands.registerCommand("explicitAI.autoFix", autoFixLoop),
     vscode.commands.registerCommand("explicitAI.newSession", () => {
       if (ChatHost.current) {
         ChatHost.current.session.newSession();
@@ -106,6 +116,22 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     })
   );
+
+  // Register inline completion provider
+  const inlineProvider = new InlineCompletionProvider();
+  context.subscriptions.push(
+    vscode.languages.registerInlineCompletionItemProvider({ pattern: "**" }, inlineProvider)
+  );
+
+  // Start terminal watcher
+  terminalWatcher.start();
+  terminalWatcher.onError((error) => {
+    // Notify the chat about terminal errors
+    if (ChatHost.current) {
+      ChatHost.current.notifyTerminalError(error.terminal, error.error);
+    }
+  });
+  context.subscriptions.push({ dispose: () => terminalWatcher.dispose() });
 
   // Send initial active file on activation
   if (vscode.window.activeTextEditor && ChatHost.current) {
@@ -132,4 +158,5 @@ function openChat(extensionUri: vscode.Uri, force?: SidebarPlacement): void {
 
 export function deactivate(): void {
   ChatPanel.disposePanel();
+  mcpManager.stopAll();
 }
